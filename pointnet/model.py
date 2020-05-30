@@ -7,43 +7,43 @@ from torch.autograd import Variable
 import numpy as np
 import torch.nn.functional as F
 
+# 可以被STNkd代替
+# class STN3d(nn.Module):
+#     def __init__(self):
+#         super(STN3d, self).__init__()
+#         self.conv1 = torch.nn.Conv1d(3, 64, 1)
+#         self.conv2 = torch.nn.Conv1d(64, 128, 1)
+#         self.conv3 = torch.nn.Conv1d(128, 1024, 1)
+#         self.fc1 = nn.Linear(1024, 512)
+#         self.fc2 = nn.Linear(512, 256)
+#         self.fc3 = nn.Linear(256, 9)
+#         self.relu = nn.ReLU()
 
-class STN3d(nn.Module):
-    def __init__(self):
-        super(STN3d, self).__init__()
-        self.conv1 = torch.nn.Conv1d(3, 64, 1)
-        self.conv2 = torch.nn.Conv1d(64, 128, 1)
-        self.conv3 = torch.nn.Conv1d(128, 1024, 1)
-        self.fc1 = nn.Linear(1024, 512)
-        self.fc2 = nn.Linear(512, 256)
-        self.fc3 = nn.Linear(256, 9)
-        self.relu = nn.ReLU()
-
-        self.bn1 = nn.BatchNorm1d(64)
-        self.bn2 = nn.BatchNorm1d(128)
-        self.bn3 = nn.BatchNorm1d(1024)
-        self.bn4 = nn.BatchNorm1d(512)
-        self.bn5 = nn.BatchNorm1d(256)
+#         self.bn1 = nn.BatchNorm1d(64)
+#         self.bn2 = nn.BatchNorm1d(128)
+#         self.bn3 = nn.BatchNorm1d(1024)
+#         self.bn4 = nn.BatchNorm1d(512)
+#         self.bn5 = nn.BatchNorm1d(256)
 
 
-    def forward(self, x):
-        batchsize = x.size()[0]
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = F.relu(self.bn3(self.conv3(x)))
-        x = torch.max(x, 2, keepdim=True)[0]
-        x = x.view(-1, 1024)
+#     def forward(self, x):
+#         batchsize = x.size()[0]
+#         x = F.relu(self.bn1(self.conv1(x)))
+#         x = F.relu(self.bn2(self.conv2(x)))
+#         x = F.relu(self.bn3(self.conv3(x)))
+#         x = torch.max(x, 2, keepdim=True)[0]
+#         x = x.view(-1, 1024)
 
-        x = F.relu(self.bn4(self.fc1(x)))
-        x = F.relu(self.bn5(self.fc2(x)))
-        x = self.fc3(x)
+#         x = F.relu(self.bn4(self.fc1(x)))
+#         x = F.relu(self.bn5(self.fc2(x)))
+#         x = self.fc3(x)
 
-        iden = Variable(torch.from_numpy(np.array([1,0,0,0,1,0,0,0,1]).astype(np.float32))).view(1,9).repeat(batchsize,1)
-        if x.is_cuda:
-            iden = iden.cuda()
-        x = x + iden
-        x = x.view(-1, 3, 3)
-        return x
+#         iden = Variable(torch.from_numpy(np.array([1,0,0,0,1,0,0,0,1]).astype(np.float32))).view(1,9).repeat(batchsize,1)
+#         if x.is_cuda:
+#             iden = iden.cuda()
+#         x = x + iden
+#         x = x.view(-1, 3, 3)
+#         return x
 
 
 class STNkd(nn.Module):
@@ -77,6 +77,7 @@ class STNkd(nn.Module):
         x = F.relu(self.bn5(self.fc2(x)))
         x = self.fc3(x)
 
+        # 单位阵 
         iden = Variable(torch.from_numpy(np.eye(self.k).flatten().astype(np.float32))).view(1,self.k*self.k).repeat(batchsize,1)
         if x.is_cuda:
             iden = iden.cuda()
@@ -85,9 +86,14 @@ class STNkd(nn.Module):
         return x
 
 class PointNetfeat(nn.Module):
+    """
+    Args:
+        - **global_feat** True，只使用全局特征，也就是N=1；False，将全局特征复制N份
+        - **feature_transform:** 是否要做特征变换，这里特指维度是64的时候
+    """
     def __init__(self, global_feat = True, feature_transform = False):
         super(PointNetfeat, self).__init__()
-        self.stn = STN3d()
+        self.stn = STNkd(k=3)
         self.conv1 = torch.nn.Conv1d(3, 64, 1)
         self.conv2 = torch.nn.Conv1d(64, 128, 1)
         self.conv3 = torch.nn.Conv1d(128, 1024, 1)
@@ -100,14 +106,22 @@ class PointNetfeat(nn.Module):
             self.fstn = STNkd(k=64)
 
     def forward(self, x):
-        n_pts = x.size()[2]
-        trans = self.stn(x)
-        x = x.transpose(2, 1)
-        x = torch.bmm(x, trans)
-        x = x.transpose(2, 1)
-        x = F.relu(self.bn1(self.conv1(x)))
+        """
+        Args: x (B,3,N)
+        Return:
+            - **x** 点云特征 (B,1024) 或者(B, 1024+64)
+            - **trans** 三维T-Net计算的参数
+            - **trans_feat** 64维T-Net计算的参数，不做特征变换为`None`
+        """
+        n_pts = x.size()[2] # N
+        trans = self.stn(x) # (B,3,3)
+        x = x.transpose(2, 1) #(B,N,3)
+        x = torch.bmm(x, trans) #(B,N,3))
+        x = x.transpose(2, 1) #(B,3,N)
+        x = F.relu(self.bn1(self.conv1(x))) #(B,64,N)
 
         if self.feature_transform:
+            #在特征空间做平移旋转不变
             trans_feat = self.fstn(x)
             x = x.transpose(2,1)
             x = torch.bmm(x, trans_feat)
@@ -127,6 +141,11 @@ class PointNetfeat(nn.Module):
             return torch.cat([x, pointfeat], 1), trans, trans_feat
 
 class PointNetCls(nn.Module):
+    """
+    Args:
+        - **k** 分类的类别数，其输出使用log_softmax来表示的
+        - **feature_transform**  是否要做特征变换
+    """
     def __init__(self, k=2, feature_transform=False):
         super(PointNetCls, self).__init__()
         self.feature_transform = feature_transform
@@ -152,7 +171,9 @@ class PointNetDenseCls(nn.Module):
         super(PointNetDenseCls, self).__init__()
         self.k = k
         self.feature_transform=feature_transform
+        # PointNet提取特征
         self.feat = PointNetfeat(global_feat=False, feature_transform=feature_transform)
+        # 将特征做分类
         self.conv1 = torch.nn.Conv1d(1088, 512, 1)
         self.conv2 = torch.nn.Conv1d(512, 256, 1)
         self.conv3 = torch.nn.Conv1d(256, 128, 1)
@@ -169,7 +190,8 @@ class PointNetDenseCls(nn.Module):
         x = F.relu(self.bn2(self.conv2(x)))
         x = F.relu(self.bn3(self.conv3(x)))
         x = self.conv4(x)
-        x = x.transpose(2,1).contiguous()
+        #为什么使用.contiguous():https://zhuanlan.zhihu.com/p/64551412
+        x = x.transpose(2,1).contiguous() 
         x = F.log_softmax(x.view(-1,self.k), dim=-1)
         x = x.view(batchsize, n_pts, self.k)
         return x, trans, trans_feat
@@ -185,29 +207,30 @@ def feature_transform_regularizer(trans):
 
 if __name__ == '__main__':
     sim_data = Variable(torch.rand(32,3,2500))
-    trans = STN3d()
-    out = trans(sim_data)
-    print('stn', out.size())
-    print('loss', feature_transform_regularizer(out))
+#     trans = STN3d()
+#     out = trans(sim_data)
+#     print('stn', out.size())
+#     print('loss', feature_transform_regularizer(out))
 
-    sim_data_64d = Variable(torch.rand(32, 64, 2500))
-    trans = STNkd(k=64)
-    out = trans(sim_data_64d)
-    print('stn64d', out.size())
-    print('loss', feature_transform_regularizer(out))
+#     sim_data_64d = Variable(torch.rand(32, 64, 2500))
+#     trans = STNkd(k=64)
+#     out = trans(sim_data_64d)
+#     print('stn64d', out.size())
+#     print('loss', feature_transform_regularizer(out))
+
+#     pointfeat = PointNetfeat(global_feat=True)
+#     out, _, _ = pointfeat(sim_data)
+#     print('global feat', out.size())
 
     pointfeat = PointNetfeat(global_feat=True)
     out, _, _ = pointfeat(sim_data)
-    print('global feat', out.size())
-
-    pointfeat = PointNetfeat(global_feat=False)
-    out, _, _ = pointfeat(sim_data)
     print('point feat', out.size())
 
-    cls = PointNetCls(k = 5)
-    out, _, _ = cls(sim_data)
-    print('class', out.size())
+#     cls = PointNetCls(k = 5)
+#     out, _, _ = cls(sim_data)
+#     print('class', out.size())
 
-    seg = PointNetDenseCls(k = 3)
-    out, _, _ = seg(sim_data)
-    print('seg', out.size())
+#     seg = PointNetDenseCls(k = 3)
+#     out, _, _ = seg(sim_data)
+#     print('seg', out.size())
+    

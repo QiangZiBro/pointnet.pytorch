@@ -1,6 +1,7 @@
 from __future__ import print_function
 import argparse
-import os
+import os,sys
+sys.path.append("..")
 import random
 import torch
 import torch.nn.parallel
@@ -100,9 +101,9 @@ num_batch = len(dataset) / opt.batchSize
 for epoch in range(opt.nepoch):
     scheduler.step()
     for i, data in enumerate(dataloader, 0):
-        points, target = data
-        target = target[:, 0]
-        points = points.transpose(2, 1)
+        points, target = data # (B,N,3) (B,1)
+        target = target[:, 0] # (B,)
+        points = points.transpose(2, 1) # (B,3,N)
         points, target = points.cuda(), target.cuda()
         optimizer.zero_grad()
         classifier = classifier.train()
